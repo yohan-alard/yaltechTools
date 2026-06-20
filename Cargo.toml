@@ -14,3 +14,7 @@ dotenvy = "0.15"
 color-eyre = "0.6"
 anyhow = "1"
 toml = "0.8"
+base64 = "0.22"
+regex = "1"
+pdf-extract = "0.7"
+rusqlite = { version = "0.32", features = ["bundled"] }

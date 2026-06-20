@@ -11,20 +11,34 @@ use crate::app::App;
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    let chunks = Layout::default()
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Percentage(55),
-            Constraint::Percentage(45),
+            Constraint::Min(5),
             Constraint::Length(3),
         ])
         .split(area);
 
-    render_header(f, chunks[0], app);
-    render_client_invoices(f, chunks[1], app);
-    render_supplier_invoices(f, chunks[2], app);
-    render_footer(f, chunks[3], app);
+    render_header(f, outer[0], app);
+    render_footer(f, outer[2], app);
+
+    // Split du contenu : gauche = Qonto, droite = Gmail
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(outer[1]);
+
+    // Colonne gauche : clients + fournisseurs empilés
+    let qonto_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(cols[0]);
+
+    render_client_invoices(f, qonto_rows[0], app);
+    render_supplier_invoices(f, qonto_rows[1], app);
+
+    render_mail_invoices(f, cols[1], app);
 }
 
 fn render_header(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -193,6 +207,82 @@ fn render_supplier_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
     f.render_widget(table, area);
 }
 
+fn render_mail_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Factures Gmail ",
+            Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightBlue));
+
+    if app.loading && app.mail_invoices.is_empty() {
+        f.render_widget(
+            Paragraph::new("\n  Chargement...").style(Style::default().fg(Color::DarkGray)).block(block),
+            area,
+        );
+        return;
+    }
+    if app.mail_invoices.is_empty() {
+        f.render_widget(
+            Paragraph::new("\n  Aucune facture détectée.").style(Style::default().fg(Color::DarkGray)).block(block),
+            area,
+        );
+        return;
+    }
+
+    let header_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let header = Row::new(vec![
+        Cell::from("Expéditeur").style(header_style),
+        Cell::from("Sujet").style(header_style),
+        Cell::from("Montant").style(header_style),
+        Cell::from("Type").style(header_style),
+        Cell::from("Date").style(header_style),
+    ])
+    .height(1)
+    .bottom_margin(1);
+
+    let rows: Vec<Row> = app
+        .mail_invoices
+        .iter()
+        .map(|m| {
+            let kind_style = match m.kind.as_str() {
+                k if k.starts_with("PDF") => Style::default().fg(Color::Green),
+                "Lien" => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            let amount_style = if m.amount == "—" {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Row::new(vec![
+                Cell::from(truncate(&m.from, 18)),
+                Cell::from(truncate(&m.subject, 24)),
+                Cell::from(m.amount.clone()).style(amount_style),
+                Cell::from(truncate(&m.kind, 14)).style(kind_style),
+                Cell::from(m.date.clone()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(18),
+            Constraint::Min(14),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Length(11),
+        ],
+    )
+    .header(header)
+    .block(block)
+    .column_spacing(1);
+
+    f.render_widget(table, area);
+}
+
 fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let last = app.last_refresh.map(|t| {
         let s = t.elapsed().as_secs();
@@ -214,7 +304,12 @@ fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let total = app.invoices.len() + app.supplier_invoices.len();
     if total > 0 {
         spans.push(Span::styled(
-            format!("  |  {} clients / {} fournisseurs", app.invoices.len(), app.supplier_invoices.len()),
+            format!(
+                "  |  {} clients / {} fourn. / {} mails",
+                app.invoices.len(),
+                app.supplier_invoices.len(),
+                app.mail_invoices.len()
+            ),
             Style::default().fg(Color::DarkGray),
         ));
     }

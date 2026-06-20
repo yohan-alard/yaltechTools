@@ -12,14 +12,30 @@ pub struct QontoConfig {
 }
 
 #[derive(Deserialize, Clone)]
+pub struct GoogleConfig {
+    pub auth_base: String,
+    pub token_url: String,
+    pub api_base: String,
+    pub redirect_uri: String,
+    pub redirect_port: u16,
+    pub scope: String,
+    pub mail_query: String,
+    pub max_results: u32,
+}
+
+#[derive(Deserialize, Clone)]
 pub struct AppConfig {
     pub token_store: String,
+    pub google_token_store: String,
+    pub cache_db: String,
+    pub pdf_dir: String,
     pub auto_refresh_secs: u64,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct Config {
     pub qonto: QontoConfig,
+    pub google: GoogleConfig,
     pub app: AppConfig,
 }
 

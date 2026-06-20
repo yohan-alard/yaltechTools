@@ -19,21 +19,34 @@ pub struct SupplierInvoice {
     pub due_date: String,
 }
 
+pub struct MailInvoice {
+    pub subject: String,
+    pub from: String,
+    pub date: String,
+    pub amount: String,
+    pub kind: String,
+    pub link: Option<String>,
+}
+
 pub struct App {
     pub access_token: String,
+    pub google_token: String,
     pub invoices: Vec<Invoice>,
     pub supplier_invoices: Vec<SupplierInvoice>,
+    pub mail_invoices: Vec<MailInvoice>,
     pub loading: bool,
     pub error: Option<String>,
     pub last_refresh: Option<Instant>,
 }
 
 impl App {
-    pub fn new(access_token: String) -> Self {
+    pub fn new(access_token: String, google_token: String) -> Self {
         Self {
             access_token,
+            google_token,
             invoices: Vec::new(),
             supplier_invoices: Vec::new(),
+            mail_invoices: Vec::new(),
             loading: true,
             error: None,
             last_refresh: None,

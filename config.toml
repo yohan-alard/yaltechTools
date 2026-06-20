@@ -5,6 +5,19 @@ redirect_uri  = "http://localhost:8080"
 redirect_port = 8080
 scope         = "offline_access client_invoices.read"
 
+[google]
+auth_base     = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url     = "https://oauth2.googleapis.com/token"
+api_base      = "https://gmail.googleapis.com/gmail/v1"
+redirect_uri  = "http://localhost:8081"
+redirect_port = 8081
+scope         = "https://www.googleapis.com/auth/gmail.readonly"
+mail_query    = "subject:facture OR (has:attachment filename:pdf) newer_than:90d"
+max_results   = 50
+
 [app]
-token_store   = "~/.local/share/yaltech-tools/qonto_tokens.json"
-auto_refresh_secs = 300
+token_store          = "~/.local/share/yaltech-tools/qonto_tokens.json"
+google_token_store   = "~/.local/share/yaltech-tools/google_tokens.json"
+cache_db             = "~/.local/share/yaltech-tools/cache.db"
+pdf_dir              = "~/.local/share/yaltech-tools/pdfs"
+auto_refresh_secs    = 300
