@@ -32,7 +32,7 @@ pub async fn ensure_access_token() -> anyhow::Result<String> {
                             save_tokens(&path, &stored)?;
                             return Ok(stored.access_token);
                         }
-                        Err(e) => eprintln!("[gmail] refresh échoué: {}", e),
+                        Err(e) => crate::logger::tlog!("[gmail] refresh échoué: {}", e),
                     }
                 }
                 let _ = std::fs::remove_file(&path);
@@ -93,7 +93,7 @@ async fn auth_code_flow() -> anyhow::Result<Tokens> {
     println!();
 
     let code = wait_for_code(cfg.redirect_port).await?;
-    eprintln!("[gmail] code reçu, échange en cours...");
+    crate::logger::tlog!("[gmail] code reçu, échange en cours...");
     exchange_code(&code, &client_id, &client_secret).await
 }
 
@@ -107,7 +107,7 @@ async fn wait_for_code(port: u16) -> anyhow::Result<String> {
         let mut buf = vec![0u8; 8192];
         let n = stream.read(&mut buf).await?;
         let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
-        eprintln!("[gmail callback] {}", request.lines().next().unwrap_or(""));
+        crate::logger::tlog!("[gmail callback] {}", request.lines().next().unwrap_or(""));
 
         match parse_callback(request) {
             CallbackResult::Code(code) => {
@@ -139,7 +139,7 @@ async fn exchange_code(code: &str, client_id: &str, client_secret: &str) -> anyh
         .send().await.context("Erreur réseau échange code Gmail")?;
 
     let status = resp.status();
-    eprintln!("[gmail] token endpoint: HTTP {}", status);
+    crate::logger::tlog!("[gmail] token endpoint: HTTP {}", status);
     if !status.is_success() {
         return Err(anyhow!("Gmail token HTTP {}: {}", status, resp.text().await.unwrap_or_default()));
     }

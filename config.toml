@@ -3,7 +3,7 @@ oauth_base    = "https://oauth-sandbox.staging.qonto.co"
 api_base      = "https://thirdparty-sandbox.staging.qonto.co"
 redirect_uri  = "http://localhost:8080"
 redirect_port = 8080
-scope         = "offline_access client_invoices.read"
+scope         = "offline_access client_invoices.read supplier_invoice.read"
 
 [google]
 auth_base     = "https://accounts.google.com/o/oauth2/v2/auth"

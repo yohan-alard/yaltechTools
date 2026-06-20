@@ -24,7 +24,7 @@ pub async fn ensure_access_token() -> anyhow::Result<String> {
                 if stored.expires_at > unix_now() + 300 {
                     return Ok(stored.access_token);
                 }
-                eprintln!("[qonto] token expiré, re-authentification...");
+                crate::logger::tlog!("[qonto] token expiré, re-authentification...");
                 let _ = std::fs::remove_file(&path);
             }
         }
@@ -43,7 +43,7 @@ async fn auth_code_flow() -> anyhow::Result<StoredTokens> {
     let staging_token =
         std::env::var("qonto.header_staging").context("qonto.header_staging manquant dans .env")?;
 
-    eprintln!("[qonto] staging token : {}...", &staging_token[..8.min(staging_token.len())]);
+    crate::logger::tlog!("[qonto] staging token : {}...", &staging_token[..8.min(staging_token.len())]);
 
     let cfg = &config::get().qonto;
     let state = generate_state();
@@ -68,7 +68,7 @@ async fn auth_code_flow() -> anyhow::Result<StoredTokens> {
     println!();
 
     let code = wait_for_code(cfg.redirect_port).await?;
-    eprintln!("[qonto] code reçu, échange en cours...");
+    crate::logger::tlog!("[qonto] code reçu, échange en cours...");
     exchange_code(&code, &client_id, &client_secret, &staging_token).await
 }
 
@@ -82,7 +82,7 @@ async fn wait_for_code(port: u16) -> anyhow::Result<String> {
         let mut buf = vec![0u8; 8192];
         let n = stream.read(&mut buf).await?;
         let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
-        eprintln!("[qonto callback] {}", request.lines().next().unwrap_or(""));
+        crate::logger::tlog!("[qonto callback] {}", request.lines().next().unwrap_or(""));
 
         match parse_callback(request) {
             CallbackResult::Code(code) => {
@@ -124,7 +124,7 @@ async fn exchange_code(
         .context("Erreur réseau échange code Qonto")?;
 
     let status = resp.status();
-    eprintln!("[qonto] token endpoint: HTTP {}", status);
+    crate::logger::tlog!("[qonto] token endpoint: HTTP {}", status);
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!(

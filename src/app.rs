@@ -41,6 +41,7 @@ pub struct App {
     pub google_token: String,
     pub invoices: Vec<Invoice>,
     pub supplier_invoices: Vec<SupplierInvoice>,
+    pub supplier_unavailable: bool,
     pub mail_invoices: Vec<MailInvoice>,
     pub mail_state: TableState,
     pub mode: AppMode,
@@ -56,6 +57,7 @@ impl App {
             google_token,
             invoices: Vec::new(),
             supplier_invoices: Vec::new(),
+            supplier_unavailable: false,
             mail_invoices: Vec::new(),
             mail_state: TableState::default(),
             mode: AppMode::Normal,
@@ -112,11 +114,12 @@ impl App {
     }
 
     /// Retire la ligne sélectionnée de la liste en mémoire.
-    /// Retourne le message_id pour persister en DB.
-    pub fn ignore_selected(&mut self) -> Option<String> {
+    /// Retourne (message_id, pdf_path) pour persister en DB et archiver le PDF.
+    pub fn ignore_selected(&mut self) -> Option<(String, Option<String>)> {
         let i = self.mail_state.selected()?;
         if i >= self.mail_invoices.len() { return None; }
         let msg_id = self.mail_invoices[i].message_id.clone();
+        let pdf_path = self.mail_invoices[i].pdf_path.clone();
         self.mail_invoices.remove(i);
         let len = self.mail_invoices.len();
         if len == 0 {
@@ -124,7 +127,7 @@ impl App {
         } else {
             self.mail_state.select(Some(i.min(len - 1)));
         }
-        Some(msg_id)
+        Some((msg_id, pdf_path))
     }
 
     /// Passe en mode édition du montant de la ligne sélectionnée.

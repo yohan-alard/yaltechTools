@@ -1,13 +1,18 @@
+use std::io::BufWriter;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::ExecutableCommand;
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod app;
 mod cache;
 mod config;
 mod gmail;
+mod logger;
 mod qonto;
 mod ui;
 
@@ -18,6 +23,7 @@ fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     config::load().map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
     cache::init().map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
+    logger::init();
 
     let rt = tokio::runtime::Runtime::new()?;
 
@@ -33,15 +39,35 @@ fn main() -> Result<()> {
 
     trigger_refresh(&rt, Arc::clone(&app));
 
-    let mut terminal = ratatui::init();
+    let mut terminal = init_tty_terminal()?;
     let result = run_loop(&mut terminal, &rt, Arc::clone(&app));
-    ratatui::restore();
+    restore_tty_terminal(&mut terminal);
 
     result
 }
 
+type TtyTerminal = Terminal<CrosstermBackend<BufWriter<std::fs::File>>>;
+
+fn init_tty_terminal() -> Result<TtyTerminal> {
+    let mut tty = BufWriter::new(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|e| color_eyre::eyre::eyre!("Impossible d'ouvrir /dev/tty: {}", e))?,
+    );
+    crossterm::terminal::enable_raw_mode()?;
+    tty.execute(EnterAlternateScreen)?;
+    Ok(Terminal::new(CrosstermBackend::new(tty))?)
+}
+
+fn restore_tty_terminal(terminal: &mut TtyTerminal) {
+    let _ = terminal.backend_mut().execute(LeaveAlternateScreen);
+    let _ = crossterm::terminal::disable_raw_mode();
+}
+
 fn run_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut TtyTerminal,
     rt: &tokio::runtime::Runtime,
     app: Arc<Mutex<App>>,
 ) -> Result<()> {
@@ -82,9 +108,10 @@ fn run_loop(
                             KeyCode::Up    => app.lock().unwrap().mail_select_prev(),
                             KeyCode::Enter => app.lock().unwrap().open_selected_pdf(),
                             KeyCode::Char('d') | KeyCode::Char('D') => {
-                                let msg_id = app.lock().unwrap().ignore_selected();
-                                if let Some(id) = msg_id {
+                                let result = app.lock().unwrap().ignore_selected();
+                                if let Some((id, pdf_path)) = result {
                                     cache::set_ignored(&id);
+                                    cache::archive_pdf(&id, pdf_path.as_deref());
                                 }
                             }
                             KeyCode::Char('e') | KeyCode::Char('E') => {

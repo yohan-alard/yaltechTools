@@ -96,6 +96,40 @@ pub fn upsert(message_id: &str, inv: &MailInvoice) {
     );
 }
 
+/// Déplace le PDF d'un message vers le sous-dossier archives/.
+/// Si pdf_path est None, cherche par préfixe de message_id dans le dossier pdfs.
+pub fn archive_pdf(message_id: &str, pdf_path: Option<&str>) {
+    let pdf_dir = expand(&config::get().app.pdf_dir);
+    let archive_dir = format!("{}/archives", pdf_dir);
+    let _ = std::fs::create_dir_all(&archive_dir);
+
+    let move_file = |src: &std::path::Path| {
+        if let Some(name) = src.file_name() {
+            let dst = std::path::Path::new(&archive_dir).join(name);
+            let _ = std::fs::rename(src, &dst);
+        }
+    };
+
+    if let Some(path) = pdf_path {
+        let src = std::path::Path::new(path);
+        if src.exists() {
+            move_file(src);
+            return;
+        }
+    }
+
+    // Fallback : scan par préfixe de message_id
+    let prefix = &message_id[..message_id.len().min(16)];
+    if let Ok(entries) = std::fs::read_dir(&pdf_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(prefix) {
+                move_file(&entry.path());
+            }
+        }
+    }
+}
+
 /// Chemin où sauvegarder un PDF pour ce message.
 pub fn pdf_path(message_id: &str, filename: &str) -> PathBuf {
     let dir = expand(&config::get().app.pdf_dir);

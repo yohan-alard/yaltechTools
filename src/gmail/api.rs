@@ -109,7 +109,7 @@ pub async fn fetch_mail_invoices(access_token: &str) -> anyhow::Result<Vec<MailI
                 results.push(inv);
             }
             Ok(None) => {}
-            Err(e) => eprintln!("[gmail] message {} ignoré: {}", msg_ref.id, e),
+            Err(e) => crate::logger::tlog!("[gmail] message {} ignoré: {}", msg_ref.id, e),
         }
     }
 

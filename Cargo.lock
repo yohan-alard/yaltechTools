@@ -2346,6 +2346,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "dotenvy",
+ "libc",
  "pdf-extract",
  "ratatui",
  "regex",
