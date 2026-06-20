@@ -7,6 +7,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 mod api;
 mod app;
 mod auth;
+mod config;
 mod ui;
 
 use app::App;
@@ -14,6 +15,7 @@ use app::App;
 fn main() -> Result<()> {
     color_eyre::install()?;
     dotenvy::dotenv().ok();
+    config::load().map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
 
     let rt = tokio::runtime::Runtime::new()?;
 
@@ -40,7 +42,7 @@ fn run_loop(
     app: Arc<Mutex<App>>,
 ) -> Result<()> {
     let poll_interval = Duration::from_millis(200);
-    let auto_refresh = Duration::from_secs(300); // 5 minutes
+    let auto_refresh = Duration::from_secs(config::get().app.auto_refresh_secs);
     let mut last_refresh = Instant::now();
 
     loop {

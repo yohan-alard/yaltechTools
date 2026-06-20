@@ -4,7 +4,11 @@ use serde::Deserialize;
 
 use crate::app::{Invoice, SupplierInvoice};
 
-const API_BASE: &str = "https://thirdparty-sandbox.staging.qonto.co";
+use crate::config;
+
+fn api_base() -> String {
+    config::get().qonto.api_base.clone()
+}
 
 fn staging_token() -> String {
     std::env::var("qonto.header_staging").unwrap_or_default()
@@ -43,7 +47,7 @@ struct QontoParty {
 
 pub async fn fetch_invoices(access_token: &str) -> anyhow::Result<Vec<Invoice>> {
     let resp = Client::new()
-        .get(format!("{}/v2/client_invoices", API_BASE))
+        .get(format!("{}/v2/client_invoices", api_base()))
         .header("Authorization", format!("Bearer {}", access_token))
         .header("X-Qonto-Staging-Token", staging_token())
         .query(&[("per_page", "100"), ("sort_by", "created_at:desc")])
@@ -109,7 +113,7 @@ struct QontoSupplierInvoice {
 
 pub async fn fetch_supplier_invoices(access_token: &str) -> anyhow::Result<Vec<SupplierInvoice>> {
     let resp = Client::new()
-        .get(format!("{}/v2/supplier_invoices", API_BASE))
+        .get(format!("{}/v2/supplier_invoices", api_base()))
         .header("Authorization", format!("Bearer {}", access_token))
         .header("X-Qonto-Staging-Token", staging_token())
         .query(&[("per_page", "100"), ("sort_by", "created_at:desc")])

@@ -5,10 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const OAUTH_BASE: &str = "https://oauth-sandbox.staging.qonto.co";
-const REDIRECT_PORT: u16 = 8080;
-const REDIRECT_URI: &str = "http://localhost:8080";
-const SCOPE: &str = "offline_access client_invoices.read";
+use crate::config;
 
 #[derive(Serialize, Deserialize)]
 struct StoredTokens {
@@ -49,13 +46,14 @@ async fn auth_code_flow() -> anyhow::Result<StoredTokens> {
 
     eprintln!("[auth] staging token chargé : {}...", &staging_token[..8.min(staging_token.len())]);
 
+    let cfg = &config::get().qonto;
     let state = generate_state();
     let auth_url = format!(
         "{}/oauth2/auth?client_id={}&redirect_uri={}&scope={}&response_type=code&state={}",
-        OAUTH_BASE,
+        cfg.oauth_base,
         url_encode(&client_id),
-        url_encode(REDIRECT_URI),
-        url_encode(SCOPE),
+        url_encode(&cfg.redirect_uri),
+        url_encode(&cfg.scope),
         state,
     );
 
@@ -79,7 +77,7 @@ async fn auth_code_flow() -> anyhow::Result<StoredTokens> {
         println!("  {}", auth_url);
     }
     println!();
-    println!("En attente du callback sur http://localhost:{}...", REDIRECT_PORT);
+    println!("En attente du callback sur {}...", cfg.redirect_uri);
     println!();
 
     let code = wait_for_code().await?;
@@ -89,9 +87,10 @@ async fn auth_code_flow() -> anyhow::Result<StoredTokens> {
 }
 
 async fn wait_for_code() -> anyhow::Result<String> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", REDIRECT_PORT))
+    let port = config::get().qonto.redirect_port;
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
-        .context(format!("Impossible d'écouter sur le port {}", REDIRECT_PORT))?;
+        .context(format!("Impossible d'écouter sur le port {}", port))?;
 
     loop {
         let (mut stream, _) = listener.accept().await?;
@@ -143,14 +142,15 @@ async fn exchange_code(
     client_secret: &str,
     staging_token: &str,
 ) -> anyhow::Result<StoredTokens> {
+    let cfg = &config::get().qonto;
     let resp = Client::new()
-        .post(format!("{}/oauth2/token", OAUTH_BASE))
+        .post(format!("{}/oauth2/token", cfg.oauth_base))
         .header("X-Qonto-Staging-Token", staging_token)
         .form(&[
             ("grant_type", "authorization_code"),
             ("client_id", client_id),
             ("client_secret", client_secret),
-            ("redirect_uri", REDIRECT_URI),
+            ("redirect_uri", cfg.redirect_uri.as_str()),
             ("code", code),
         ])
         .send()
@@ -241,8 +241,14 @@ fn save_tokens(path: &std::path::Path, tokens: &StoredTokens) -> anyhow::Result<
 }
 
 fn token_path() -> anyhow::Result<std::path::PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    Ok(std::path::Path::new(&home).join(".local/share/yaltech-tools/qonto_tokens.json"))
+    let raw = &config::get().app.token_store;
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/{}", home, rest)
+    } else {
+        raw.clone()
+    };
+    Ok(std::path::PathBuf::from(expanded))
 }
 
 fn unix_now() -> u64 {
