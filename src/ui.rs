@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use crate::app::{App, Panel};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -38,7 +38,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_client_invoices(f, qonto_rows[0], app);
     render_supplier_invoices(f, qonto_rows[1], app);
 
-    render_mail_invoices(f, cols[1], app);
+    let right_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(5)])
+        .split(cols[1]);
+
+    render_reminders(f, right_rows[0], app);
+    render_mail_invoices(f, right_rows[1], app);
 
     if let Some(buf) = app.edit_buffer() {
         render_edit_popup(f, area, buf);
@@ -299,6 +305,67 @@ fn render_mail_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &mut Ap
     f.render_stateful_widget(table, area, &mut app.mail_state);
 }
 
+fn render_reminders(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
+    let is_active = app.active_panel == Panel::Reminders;
+    let border_style = if is_active {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let block = Block::default()
+        .title(Span::styled(
+            " Rappels du mois ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    let visible = app.visible_reminders();
+
+    if visible.is_empty() {
+        f.render_widget(
+            Paragraph::new("\n  Aucun rappel cette semaine")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows: Vec<Row> = visible.iter().map(|(r, delta)| {
+        let (status, style) = match delta {
+            d if *d <= 0 => (
+                if *d == 0 { "Aujourd'hui !".to_string() } else { format!("En retard {}j", -d) },
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            1 => ("Demain".to_string(), Style::default().fg(Color::Red)),
+            2 => ("Dans 2j".to_string(), Style::default().fg(Color::Red)),
+            d => (format!("Dans {}j", d), Style::default().fg(Color::Green)),
+        };
+        Row::new(vec![
+            Cell::from(format!("J{:02}", r.day)).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(r.label),
+            Cell::from(status).style(style),
+        ])
+    }).collect();
+
+    let highlight_style = Style::default()
+        .bg(Color::DarkGray)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(4), Constraint::Min(20), Constraint::Length(14)],
+    )
+    .block(block)
+    .row_highlight_style(highlight_style)
+    .highlight_symbol("> ")
+    .column_spacing(2);
+
+    f.render_stateful_widget(table, area, &mut app.reminder_state);
+}
+
 fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let last = app.last_refresh.map(|t| {
         let s = t.elapsed().as_secs();
@@ -310,9 +377,17 @@ fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             Span::styled("[Entrée] Confirmer", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled("  [Esc] Annuler", Style::default().fg(Color::DarkGray)),
         ]
+    } else if app.active_panel == Panel::Reminders {
+        vec![
+            Span::styled("[q] Quitter", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [Tab] Factures Gmail", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [↑↓] Naviguer", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [Entrée] Acquitter", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]
     } else {
         vec![
             Span::styled("[q] Quitter", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [Tab] Rappels", Style::default().fg(Color::DarkGray)),
             Span::styled("  [r] Rafraichir", Style::default().fg(Color::DarkGray)),
             Span::styled("  [↑↓] Naviguer", Style::default().fg(Color::DarkGray)),
             Span::styled("  [Entrée] PDF", Style::default().fg(Color::DarkGray)),

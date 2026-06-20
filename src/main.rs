@@ -1,4 +1,5 @@
 use std::io::BufWriter;
+use chrono::Local;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ mod logger;
 mod qonto;
 mod ui;
 
-use app::App;
+use app::{App, Panel};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -35,7 +36,11 @@ fn main() -> Result<()> {
         .block_on(gmail::auth::ensure_access_token())
         .map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
 
-    let app = Arc::new(Mutex::new(App::new(qonto_token, google_token)));
+    let reminder_acks = {
+        let month = Local::now().format("%Y-%m").to_string();
+        cache::load_reminder_acks(&month)
+    };
+    let app = Arc::new(Mutex::new(App::new(qonto_token, google_token, reminder_acks)));
 
     trigger_refresh(&rt, Arc::clone(&app));
 
@@ -104,9 +109,33 @@ fn run_loop(
                                 trigger_refresh(rt, Arc::clone(&app));
                                 last_refresh = Instant::now();
                             }
-                            KeyCode::Down  => app.lock().unwrap().mail_select_next(),
-                            KeyCode::Up    => app.lock().unwrap().mail_select_prev(),
-                            KeyCode::Enter => app.lock().unwrap().open_selected_pdf(),
+                            KeyCode::Tab => app.lock().unwrap().switch_panel(),
+                            KeyCode::Down => {
+                                let mut a = app.lock().unwrap();
+                                match a.active_panel {
+                                    Panel::Reminders => a.reminder_select_next(),
+                                    Panel::Mail      => a.mail_select_next(),
+                                }
+                            }
+                            KeyCode::Up => {
+                                let mut a = app.lock().unwrap();
+                                match a.active_panel {
+                                    Panel::Reminders => a.reminder_select_prev(),
+                                    Panel::Mail      => a.mail_select_prev(),
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let ack_key = {
+                                    let mut a = app.lock().unwrap();
+                                    match a.active_panel {
+                                        Panel::Reminders => a.ack_selected_reminder(),
+                                        Panel::Mail      => { a.open_selected_pdf(); None }
+                                    }
+                                };
+                                if let Some(ref key) = ack_key {
+                                    cache::save_reminder_ack(key);
+                                }
+                            }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 let result = app.lock().unwrap().ignore_selected();
                                 if let Some((id, pdf_path)) = result {

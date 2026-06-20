@@ -21,7 +21,8 @@ pub fn init() -> anyhow::Result<()> {
         .with_context(|| format!("Impossible d'ouvrir {}", db_path))?;
 
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS mail_invoices (
+        "CREATE TABLE IF NOT EXISTS reminder_acks (key TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS mail_invoices (
             message_id  TEXT PRIMARY KEY,
             subject     TEXT NOT NULL DEFAULT '',
             from_name   TEXT NOT NULL DEFAULT '',
@@ -192,6 +193,27 @@ pub fn load_all() -> Vec<(String, MailInvoice)> {
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())
     .unwrap_or_default()
+}
+
+/// Charge les acquittements de rappels pour le mois donné (format "2026-06").
+pub fn load_reminder_acks(month: &str) -> std::collections::HashSet<String> {
+    let guard = DB.lock().unwrap();
+    let Some(conn) = guard.as_ref() else { return Default::default() };
+    let prefix = format!("{}|", month);
+    let mut stmt = match conn.prepare("SELECT key FROM reminder_acks WHERE key LIKE ?1") {
+        Ok(s) => s,
+        Err(_) => return Default::default(),
+    };
+    stmt.query_map(params![format!("{}%", prefix)], |row| row.get::<_, String>(0))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Persiste un acquittement de rappel.
+pub fn save_reminder_ack(key: &str) {
+    let guard = DB.lock().unwrap();
+    let Some(conn) = guard.as_ref() else { return };
+    let _ = conn.execute("INSERT OR IGNORE INTO reminder_acks(key) VALUES(?1)", params![key]);
 }
 
 pub fn expand(path: &str) -> String {
