@@ -83,13 +83,23 @@ fn trigger_refresh(rt: &tokio::runtime::Runtime, app: Arc<Mutex<App>>) {
     }
 
     rt.spawn(async move {
-        let result = api::qonto::fetch_invoices(&token).await;
+        let (client_result, supplier_result) = tokio::join!(
+            api::qonto::fetch_invoices(&token),
+            api::qonto::fetch_supplier_invoices(&token),
+        );
         let mut a = app.lock().unwrap();
         a.loading = false;
         a.last_refresh = Some(Instant::now());
-        match result {
+        match client_result {
             Ok(invoices) => a.invoices = invoices,
             Err(e) => a.error = Some(e.to_string()),
+        }
+        match supplier_result {
+            Ok(invoices) => a.supplier_invoices = invoices,
+            Err(e) => {
+                let msg = format!("Fournisseurs: {}", e);
+                a.error = Some(a.error.take().map(|prev| format!("{} | {}", prev, msg)).unwrap_or(msg));
+            }
         }
     });
 }
