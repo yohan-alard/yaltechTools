@@ -1,14 +1,14 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
     Frame,
 };
 
 use crate::app::App;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     let outer = Layout::default()
@@ -39,6 +39,10 @@ pub fn render(f: &mut Frame, app: &App) {
     render_supplier_invoices(f, qonto_rows[1], app);
 
     render_mail_invoices(f, cols[1], app);
+
+    if let Some(buf) = app.edit_buffer() {
+        render_edit_popup(f, area, buf);
+    }
 }
 
 fn render_header(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -207,14 +211,19 @@ fn render_supplier_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
     f.render_widget(table, area);
 }
 
-fn render_mail_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+fn render_mail_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
+    let has_selection = app.mail_state.selected().is_some();
     let block = Block::default()
         .title(Span::styled(
             " Factures Gmail ",
             Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightBlue));
+        .border_style(if has_selection {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::LightBlue)
+        });
 
     if app.loading && app.mail_invoices.is_empty() {
         f.render_widget(
@@ -266,6 +275,11 @@ fn render_mail_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         })
         .collect();
 
+    let highlight_style = Style::default()
+        .bg(Color::DarkGray)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
     let table = Table::new(
         rows,
         [
@@ -278,9 +292,11 @@ fn render_mail_invoices(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     )
     .header(header)
     .block(block)
+    .row_highlight_style(highlight_style)
+    .highlight_symbol("> ")
     .column_spacing(1);
 
-    f.render_widget(table, area);
+    f.render_stateful_widget(table, area, &mut app.mail_state);
 }
 
 fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -289,10 +305,21 @@ fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         if s < 60 { format!("il y a {}s", s) } else { format!("il y a {}m{}s", s / 60, s % 60) }
     });
 
-    let mut spans = vec![
-        Span::styled("[q] Quitter", Style::default().fg(Color::DarkGray)),
-        Span::styled("  [r] Rafraichir", Style::default().fg(Color::DarkGray)),
-    ];
+    let mut spans = if app.is_editing() {
+        vec![
+            Span::styled("[Entrée] Confirmer", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("  [Esc] Annuler", Style::default().fg(Color::DarkGray)),
+        ]
+    } else {
+        vec![
+            Span::styled("[q] Quitter", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [r] Rafraichir", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [↑↓] Naviguer", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [Entrée] PDF", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [e] Montant", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [d] Ignorer", Style::default().fg(Color::DarkGray)),
+        ]
+    };
 
     if let Some(ref t) = last {
         spans.push(Span::styled(
@@ -354,6 +381,47 @@ fn format_date(date: &str) -> String {
         }
     }
     date.to_string()
+}
+
+fn render_edit_popup(f: &mut Frame, area: Rect, buffer: &str) {
+    let popup = centered_rect(50, 5, area);
+    f.render_widget(Clear, popup);
+
+    let content = format!("  {}_", buffer);
+    let p = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(content, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+    ])
+    .block(
+        Block::default()
+            .title(Span::styled(
+                " Saisir le montant ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(p, popup);
+}
+
+fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(height),
+            Constraint::Fill(1),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vert[1])[1]
 }
 
 fn truncate(s: &str, max: usize) -> String {

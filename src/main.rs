@@ -51,20 +51,47 @@ fn run_loop(
 
     loop {
         {
-            let a = app.lock().unwrap();
-            terminal.draw(|f| ui::render(f, &a))?;
+            let mut a = app.lock().unwrap();
+            terminal.draw(|f| ui::render(f, &mut a))?;
         }
 
         if event::poll(poll_interval)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Char('r') | KeyCode::Char('R') => {
-                            trigger_refresh(rt, Arc::clone(&app));
-                            last_refresh = Instant::now();
+                    if app.lock().unwrap().is_editing() {
+                        match key.code {
+                            KeyCode::Esc => app.lock().unwrap().cancel_edit(),
+                            KeyCode::Enter => {
+                                let result = app.lock().unwrap().confirm_edit_amount();
+                                if let Some((msg_id, amount)) = result {
+                                    cache::set_amount(&msg_id, &amount);
+                                }
+                            }
+                            KeyCode::Backspace => app.lock().unwrap().pop_char(),
+                            KeyCode::Char(c)   => app.lock().unwrap().push_char(c),
+                            _ => {}
                         }
-                        _ => {}
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                trigger_refresh(rt, Arc::clone(&app));
+                                last_refresh = Instant::now();
+                            }
+                            KeyCode::Down  => app.lock().unwrap().mail_select_next(),
+                            KeyCode::Up    => app.lock().unwrap().mail_select_prev(),
+                            KeyCode::Enter => app.lock().unwrap().open_selected_pdf(),
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                let msg_id = app.lock().unwrap().ignore_selected();
+                                if let Some(id) = msg_id {
+                                    cache::set_ignored(&id);
+                                }
+                            }
+                            KeyCode::Char('e') | KeyCode::Char('E') => {
+                                app.lock().unwrap().start_edit_amount();
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -102,7 +129,15 @@ fn trigger_refresh(rt: &tokio::runtime::Runtime, app: Arc<Mutex<App>>) {
         let mut errors: Vec<String> = Vec::new();
         match client_res   { Ok(v) => a.invoices = v,           Err(e) => errors.push(format!("Qonto clients: {}", e)) }
         match supplier_res { Ok(v) => a.supplier_invoices = v,  Err(e) => errors.push(format!("Qonto fourn.: {}", e)) }
-        match mail_res     { Ok(v) => a.mail_invoices = v,      Err(e) => errors.push(format!("Gmail: {}", e)) }
+        match mail_res {
+            Ok(v) => {
+                a.mail_invoices = v;
+                if !a.mail_invoices.is_empty() && a.mail_state.selected().is_none() {
+                    a.mail_state.select(Some(0));
+                }
+            }
+            Err(e) => errors.push(format!("Gmail: {}", e)),
+        }
         if !errors.is_empty() { a.error = Some(errors.join(" | ")); }
     });
 }

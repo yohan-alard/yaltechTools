@@ -105,7 +105,7 @@ pub async fn fetch_mail_invoices(access_token: &str) -> anyhow::Result<Vec<MailI
         // Nouveau message → fetch + cache
         match fetch_message(&client, access_token, &msg_ref.id).await {
             Ok(Some(inv)) => {
-                cache::upsert(&msg_ref.id, &inv, None);
+                cache::upsert(&msg_ref.id, &inv);
                 results.push(inv);
             }
             Ok(None) => {}
@@ -175,11 +175,15 @@ async fn fetch_message(
     if !pdf_attachments.is_empty() {
         let mut amount: Option<String> = None;
         let mut filenames: Vec<String> = Vec::new();
+        let mut first_pdf_path: Option<String> = None;
 
         for (filename, att_id) in &pdf_attachments {
             filenames.push(filename.clone());
             if let Some(id_str) = att_id {
                 let pdf_path = cache::pdf_path(&msg.id, filename);
+                if first_pdf_path.is_none() {
+                    first_pdf_path = Some(pdf_path.to_string_lossy().into_owned());
+                }
                 if let Ok(text) =
                     fetch_and_extract_pdf(client, access_token, &msg.id, id_str, &pdf_path).await
                 {
@@ -191,24 +195,28 @@ async fn fetch_message(
         }
 
         return Ok(Some(MailInvoice {
+            message_id: msg.id.clone(),
             subject,
             from: extract_name(&from),
             date,
             amount: amount.unwrap_or_else(|| "—".to_string()),
             kind: format!("PDF ({})", filenames.join(", ")),
             link: None,
+            pdf_path: first_pdf_path,
         }));
     }
 
     // Pas de PDF joint — cherche des liens de téléchargement dans le corps
     if let Some(link) = extract_invoice_link(&body_text) {
         return Ok(Some(MailInvoice {
+            message_id: msg.id.clone(),
             subject,
             from: extract_name(&from),
             date,
             amount: "—".to_string(),
             kind: "Lien".to_string(),
             link: Some(link),
+            pdf_path: None,
         }));
     }
 
@@ -217,12 +225,14 @@ async fn fetch_message(
         || subject.to_lowercase().contains("invoice")
     {
         return Ok(Some(MailInvoice {
+            message_id: msg.id.clone(),
             subject,
             from: extract_name(&from),
             date,
             amount: "—".to_string(),
             kind: "Mail".to_string(),
             link: None,
+            pdf_path: None,
         }));
     }
 

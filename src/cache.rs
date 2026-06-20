@@ -30,9 +30,12 @@ pub fn init() -> anyhow::Result<()> {
             kind        TEXT NOT NULL DEFAULT 'Mail',
             link        TEXT,
             pdf_path    TEXT,
-            cached_at   INTEGER NOT NULL
+            cached_at   INTEGER NOT NULL,
+            ignored     INTEGER NOT NULL DEFAULT 0
         );",
     )?;
+    // Migration : colonne ignored sur tables existantes
+    let _ = conn.execute_batch("ALTER TABLE mail_invoices ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;");
 
     *DB.lock().unwrap() = Some(conn);
     Ok(())
@@ -44,17 +47,19 @@ pub fn get(message_id: &str) -> Option<MailInvoice> {
     let conn = guard.as_ref()?;
 
     conn.query_row(
-        "SELECT subject, from_name, date, amount, kind, link
+        "SELECT subject, from_name, date, amount, kind, link, pdf_path
          FROM mail_invoices WHERE message_id = ?1",
         params![message_id],
         |row| {
             Ok(MailInvoice {
+                message_id: message_id.to_string(),
                 subject:  row.get(0)?,
                 from:     row.get(1)?,
                 date:     row.get(2)?,
                 amount:   row.get(3)?,
                 kind:     row.get(4)?,
                 link:     row.get(5)?,
+                pdf_path: row.get(6)?,
             })
         },
     )
@@ -62,7 +67,7 @@ pub fn get(message_id: &str) -> Option<MailInvoice> {
 }
 
 /// Insère ou met à jour une entrée dans le cache.
-pub fn upsert(message_id: &str, inv: &MailInvoice, pdf_path: Option<&Path>) {
+pub fn upsert(message_id: &str, inv: &MailInvoice) {
     let guard = DB.lock().unwrap();
     let Some(conn) = guard.as_ref() else { return };
     let now = std::time::SystemTime::now()
@@ -70,14 +75,13 @@ pub fn upsert(message_id: &str, inv: &MailInvoice, pdf_path: Option<&Path>) {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let pdf_str = pdf_path.map(|p| p.to_string_lossy().to_string());
-
     let _ = conn.execute(
         "INSERT INTO mail_invoices
             (message_id, subject, from_name, date, amount, kind, link, pdf_path, cached_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(message_id) DO UPDATE SET
-            amount=excluded.amount, kind=excluded.kind, cached_at=excluded.cached_at",
+            amount=excluded.amount, kind=excluded.kind, cached_at=excluded.cached_at,
+            pdf_path=COALESCE(excluded.pdf_path, mail_invoices.pdf_path)",
         params![
             message_id,
             inv.subject,
@@ -86,7 +90,7 @@ pub fn upsert(message_id: &str, inv: &MailInvoice, pdf_path: Option<&Path>) {
             inv.amount,
             inv.kind,
             inv.link,
-            pdf_str,
+            inv.pdf_path,
             now,
         ],
     );
@@ -103,29 +107,52 @@ pub fn pdf_path(message_id: &str, filename: &str) -> PathBuf {
     Path::new(&dir).join(format!("{}_{}", &message_id[..message_id.len().min(16)], safe_name))
 }
 
+/// Marque un message comme ignoré (ne sera plus affiché).
+pub fn set_ignored(message_id: &str) {
+    let guard = DB.lock().unwrap();
+    let Some(conn) = guard.as_ref() else { return };
+    let _ = conn.execute(
+        "UPDATE mail_invoices SET ignored=1 WHERE message_id=?1",
+        params![message_id],
+    );
+}
+
+/// Met à jour le montant d'un message (saisie manuelle).
+pub fn set_amount(message_id: &str, amount: &str) {
+    let guard = DB.lock().unwrap();
+    let Some(conn) = guard.as_ref() else { return };
+    let _ = conn.execute(
+        "UPDATE mail_invoices SET amount=?1 WHERE message_id=?2",
+        params![amount, message_id],
+    );
+}
+
 /// Retourne tous les messages déjà en cache (pour le chargement initial rapide).
 pub fn load_all() -> Vec<(String, MailInvoice)> {
     let guard = DB.lock().unwrap();
     let Some(conn) = guard.as_ref() else { return Vec::new() };
 
     let mut stmt = match conn.prepare(
-        "SELECT message_id, subject, from_name, date, amount, kind, link
-         FROM mail_invoices ORDER BY cached_at DESC",
+        "SELECT message_id, subject, from_name, date, amount, kind, link, pdf_path
+         FROM mail_invoices WHERE ignored=0 ORDER BY cached_at DESC",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
 
     stmt.query_map([], |row| {
+        let message_id: String = row.get(0)?;
         Ok((
-            row.get::<_, String>(0)?,
+            message_id.clone(),
             MailInvoice {
-                subject: row.get(1)?,
-                from:    row.get(2)?,
-                date:    row.get(3)?,
-                amount:  row.get(4)?,
-                kind:    row.get(5)?,
-                link:    row.get(6)?,
+                message_id,
+                subject:  row.get(1)?,
+                from:     row.get(2)?,
+                date:     row.get(3)?,
+                amount:   row.get(4)?,
+                kind:     row.get(5)?,
+                link:     row.get(6)?,
+                pdf_path: row.get(7)?,
             },
         ))
     })
