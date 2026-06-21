@@ -1,21 +1,25 @@
 use std::io::BufWriter;
-use chrono::Local;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::Local;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod app;
-mod cache;
 mod config;
+mod db;
 mod gmail;
 mod logger;
+mod models;
+mod oauth;
+mod pdf;
 mod qonto;
 mod ui;
+mod util;
 
 use app::{App, Panel};
 
@@ -23,7 +27,7 @@ fn main() -> Result<()> {
     color_eyre::install()?;
     dotenvy::dotenv().ok();
     config::load().map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
-    cache::init().map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
+    db::init().map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
     logger::init();
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -38,7 +42,7 @@ fn main() -> Result<()> {
 
     let reminder_acks = {
         let month = Local::now().format("%Y-%m").to_string();
-        cache::load_reminder_acks(&month)
+        db::load_reminder_acks(&month)
     };
     let app = Arc::new(Mutex::new(App::new(qonto_token, google_token, reminder_acks)));
 
@@ -95,16 +99,18 @@ fn run_loop(
                             KeyCode::Enter => {
                                 let result = app.lock().unwrap().confirm_edit_amount();
                                 if let Some((msg_id, amount)) = result {
-                                    cache::set_amount(&msg_id, &amount);
+                                    db::set_amount(&msg_id, &amount);
                                 }
                             }
                             KeyCode::Backspace => app.lock().unwrap().pop_char(),
-                            KeyCode::Char(c)   => app.lock().unwrap().push_char(c),
+                            KeyCode::Char(c) => app.lock().unwrap().push_char(c),
                             _ => {}
                         }
                     } else {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                                return Ok(())
+                            }
                             KeyCode::Char('r') | KeyCode::Char('R') => {
                                 trigger_refresh(rt, Arc::clone(&app));
                                 last_refresh = Instant::now();
@@ -114,14 +120,14 @@ fn run_loop(
                                 let mut a = app.lock().unwrap();
                                 match a.active_panel {
                                     Panel::Reminders => a.reminder_select_next(),
-                                    Panel::Mail      => a.mail_select_next(),
+                                    Panel::Mail => a.mail_select_next(),
                                 }
                             }
                             KeyCode::Up => {
                                 let mut a = app.lock().unwrap();
                                 match a.active_panel {
                                     Panel::Reminders => a.reminder_select_prev(),
-                                    Panel::Mail      => a.mail_select_prev(),
+                                    Panel::Mail => a.mail_select_prev(),
                                 }
                             }
                             KeyCode::Enter => {
@@ -129,18 +135,21 @@ fn run_loop(
                                     let mut a = app.lock().unwrap();
                                     match a.active_panel {
                                         Panel::Reminders => a.ack_selected_reminder(),
-                                        Panel::Mail      => { a.open_selected_pdf(); None }
+                                        Panel::Mail => {
+                                            a.open_selected_pdf();
+                                            None
+                                        }
                                     }
                                 };
                                 if let Some(ref key) = ack_key {
-                                    cache::save_reminder_ack(key);
+                                    db::save_reminder_ack(key);
                                 }
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 let result = app.lock().unwrap().ignore_selected();
                                 if let Some((id, pdf_path)) = result {
-                                    cache::set_ignored(&id);
-                                    cache::archive_pdf(&id, pdf_path.as_deref());
+                                    db::set_ignored(&id);
+                                    pdf::storage::archive(&id, pdf_path.as_deref());
                                 }
                             }
                             KeyCode::Char('e') | KeyCode::Char('E') => {
@@ -183,8 +192,14 @@ fn trigger_refresh(rt: &tokio::runtime::Runtime, app: Arc<Mutex<App>>) {
         a.last_refresh = Some(Instant::now());
 
         let mut errors: Vec<String> = Vec::new();
-        match client_res   { Ok(v) => a.invoices = v,           Err(e) => errors.push(format!("Qonto clients: {}", e)) }
-        match supplier_res { Ok(v) => a.supplier_invoices = v,  Err(e) => errors.push(format!("Qonto fourn.: {}", e)) }
+        match client_res {
+            Ok(v) => a.invoices = v,
+            Err(e) => errors.push(format!("Qonto clients: {}", e)),
+        }
+        match supplier_res {
+            Ok(v) => a.supplier_invoices = v,
+            Err(e) => errors.push(format!("Qonto fourn.: {}", e)),
+        }
         match mail_res {
             Ok(v) => {
                 a.mail_invoices = v;
@@ -194,6 +209,8 @@ fn trigger_refresh(rt: &tokio::runtime::Runtime, app: Arc<Mutex<App>>) {
             }
             Err(e) => errors.push(format!("Gmail: {}", e)),
         }
-        if !errors.is_empty() { a.error = Some(errors.join(" | ")); }
+        if !errors.is_empty() {
+            a.error = Some(errors.join(" | "));
+        }
     });
 }

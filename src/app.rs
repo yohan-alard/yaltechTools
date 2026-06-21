@@ -1,51 +1,16 @@
 use std::collections::HashSet;
 use std::time::Instant;
+
 use chrono::Datelike;
 use ratatui::widgets::TableState;
 
-pub struct Reminder {
-    pub day: u32,
-    pub label: &'static str,
-}
-
-pub const REMINDERS: &[Reminder] = &[
-    Reminder { day: 10, label: "Envoyer l'export comptable" },
-    Reminder { day: 25, label: "Saisir temps dans Bound" },
-    Reminder { day: 28, label: "Envoyer la facture mensuelle" },
-    Reminder { day: 28, label: "Saisir indemnites de route" },
-];
+use crate::models::{Invoice, MailInvoice, Reminder, SupplierInvoice, REMINDERS};
+use crate::pdf;
 
 #[derive(PartialEq)]
-pub enum Panel { Reminders, Mail }
-
-pub struct Invoice {
-    pub number: String,
-    pub client: String,
-    pub amount_cents: i64,
-    pub currency: String,
-    pub status: String,
-    pub issue_date: String,
-    pub due_date: String,
-}
-
-pub struct SupplierInvoice {
-    pub label: String,
-    pub supplier: String,
-    pub amount_cents: i64,
-    pub currency: String,
-    pub status: String,
-    pub due_date: String,
-}
-
-pub struct MailInvoice {
-    pub message_id: String,
-    pub subject: String,
-    pub from: String,
-    pub date: String,
-    pub amount: String,
-    pub kind: String,
-    pub link: Option<String>,
-    pub pdf_path: Option<String>,
+pub enum Panel {
+    Reminders,
+    Mail,
 }
 
 pub enum AppMode {
@@ -71,7 +36,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(access_token: String, google_token: String, reminder_acks: HashSet<String>) -> Self {
+    pub fn new(
+        access_token: String,
+        google_token: String,
+        reminder_acks: HashSet<String>,
+    ) -> Self {
         Self {
             access_token,
             google_token,
@@ -94,12 +63,17 @@ impl App {
         let today = chrono::Local::now();
         let current_day = today.day();
         let month_key = today.format("%Y-%m").to_string();
-        REMINDERS.iter()
+        REMINDERS
+            .iter()
             .filter_map(|r| {
                 let delta = r.day as i32 - current_day as i32;
-                if delta >= 7 { return None; }
+                if delta >= 7 {
+                    return None;
+                }
                 let ack_key = format!("{}|{}|{}", month_key, r.day, r.label);
-                if self.reminder_acks.contains(&ack_key) { return None; }
+                if self.reminder_acks.contains(&ack_key) {
+                    return None;
+                }
                 Some((r, delta))
             })
             .collect()
@@ -124,7 +98,9 @@ impl App {
 
     pub fn reminder_select_next(&mut self) {
         let len = self.visible_reminders().len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let next = match self.reminder_state.selected() {
             Some(i) => (i + 1) % len,
             None => 0,
@@ -134,7 +110,9 @@ impl App {
 
     pub fn reminder_select_prev(&mut self) {
         let len = self.visible_reminders().len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let prev = match self.reminder_state.selected() {
             Some(0) | None => len - 1,
             Some(i) => i - 1,
@@ -145,7 +123,9 @@ impl App {
     pub fn switch_panel(&mut self) {
         self.active_panel = match self.active_panel {
             Panel::Mail => {
-                if self.reminder_state.selected().is_none() && !self.visible_reminders().is_empty() {
+                if self.reminder_state.selected().is_none()
+                    && !self.visible_reminders().is_empty()
+                {
                     self.reminder_state.select(Some(0));
                 }
                 Panel::Reminders
@@ -156,7 +136,9 @@ impl App {
 
     pub fn mail_select_next(&mut self) {
         let len = self.mail_invoices.len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let next = match self.mail_state.selected() {
             Some(i) => (i + 1) % len,
             None => 0,
@@ -166,7 +148,9 @@ impl App {
 
     pub fn mail_select_prev(&mut self) {
         let len = self.mail_invoices.len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let prev = match self.mail_state.selected() {
             Some(0) | None => len - 1,
             Some(i) => i - 1,
@@ -177,34 +161,14 @@ impl App {
     pub fn open_selected_pdf(&self) {
         let Some(i) = self.mail_state.selected() else { return };
         let Some(inv) = self.mail_invoices.get(i) else { return };
-
-        if let Some(ref path) = inv.pdf_path {
-            if std::path::Path::new(path).exists() {
-                let _ = std::process::Command::new("open").arg(path).spawn();
-                return;
-            }
-        }
-
-        // Fallback : cherche dans le répertoire pdfs par préfixe de message_id
-        if let Ok(home) = std::env::var("HOME") {
-            let pdf_dir = format!("{}/.local/share/yaltech-tools/pdfs", home);
-            let prefix = &inv.message_id[..inv.message_id.len().min(16)];
-            if let Ok(entries) = std::fs::read_dir(&pdf_dir) {
-                for entry in entries.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with(prefix) {
-                        let _ = std::process::Command::new("open").arg(entry.path()).spawn();
-                        return;
-                    }
-                }
-            }
-        }
+        pdf::viewer::find_and_open(&inv.message_id, inv.pdf_path.as_deref());
     }
 
-    /// Retire la ligne sélectionnée de la liste en mémoire.
-    /// Retourne (message_id, pdf_path) pour persister en DB et archiver le PDF.
     pub fn ignore_selected(&mut self) -> Option<(String, Option<String>)> {
         let i = self.mail_state.selected()?;
-        if i >= self.mail_invoices.len() { return None; }
+        if i >= self.mail_invoices.len() {
+            return None;
+        }
         let msg_id = self.mail_invoices[i].message_id.clone();
         let pdf_path = self.mail_invoices[i].pdf_path.clone();
         self.mail_invoices.remove(i);
@@ -217,11 +181,14 @@ impl App {
         Some((msg_id, pdf_path))
     }
 
-    /// Passe en mode édition du montant de la ligne sélectionnée.
     pub fn start_edit_amount(&mut self) {
         let Some(i) = self.mail_state.selected() else { return };
         let Some(inv) = self.mail_invoices.get(i) else { return };
-        let current = if inv.amount == "—" { String::new() } else { inv.amount.clone() };
+        let current = if inv.amount == "—" {
+            String::new()
+        } else {
+            inv.amount.clone()
+        };
         self.mode = AppMode::EditAmount(current);
     }
 
@@ -237,7 +204,6 @@ impl App {
         }
     }
 
-    /// Confirme la saisie. Retourne (message_id, nouveau_montant) pour persister.
     pub fn confirm_edit_amount(&mut self) -> Option<(String, String)> {
         let buf = match self.mode {
             AppMode::EditAmount(ref b) => b.clone(),
@@ -246,7 +212,11 @@ impl App {
         let i = self.mail_state.selected()?;
         let inv = self.mail_invoices.get_mut(i)?;
         let msg_id = inv.message_id.clone();
-        inv.amount = if buf.trim().is_empty() { "—".to_string() } else { buf.trim().to_string() };
+        inv.amount = if buf.trim().is_empty() {
+            "—".to_string()
+        } else {
+            buf.trim().to_string()
+        };
         self.mode = AppMode::Normal;
         Some((msg_id, inv.amount.clone()))
     }

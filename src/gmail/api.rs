@@ -1,12 +1,12 @@
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE, Engine};
-use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::app::MailInvoice;
-use crate::cache;
 use crate::config;
+use crate::db;
+use crate::models::MailInvoice;
+use crate::pdf;
 
 // ── Structures API Gmail ──────────────────────────────────────────────────────
 
@@ -63,11 +63,6 @@ struct Body {
     data: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct AttachmentBody {
-    data: String,
-}
-
 // ── Point d'entrée principal ──────────────────────────────────────────────────
 
 pub async fn fetch_mail_invoices(access_token: &str) -> anyhow::Result<Vec<MailInvoice>> {
@@ -88,24 +83,20 @@ pub async fn fetch_mail_invoices(access_token: &str) -> anyhow::Result<Vec<MailI
         .await
         .context("Gmail list parse")?;
 
-    // Commence par charger tout le cache existant
-    let mut cached: std::collections::HashMap<String, MailInvoice> = cache::load_all()
-        .into_iter()
-        .collect();
+    let mut cached: std::collections::HashMap<String, MailInvoice> =
+        db::load_all().into_iter().collect();
 
     let mut results: Vec<MailInvoice> = Vec::new();
 
     for msg_ref in list.messages.iter().take(cfg.google.max_results as usize) {
-        // Message déjà en cache → on l'utilise directement
         if let Some(inv) = cached.remove(&msg_ref.id) {
             results.push(inv);
             continue;
         }
 
-        // Nouveau message → fetch + cache
         match fetch_message(&client, access_token, &msg_ref.id).await {
             Ok(Some(inv)) => {
-                cache::upsert(&msg_ref.id, &inv);
+                db::upsert(&msg_ref.id, &inv);
                 results.push(inv);
             }
             Ok(None) => {}
@@ -159,8 +150,7 @@ async fn fetch_message(
         .map(|h| h.value.clone())
         .unwrap_or_default();
 
-    // Cherche les pièces jointes PDF et le corps du message
-    let mut pdf_attachments: Vec<(String, Option<String>)> = Vec::new(); // (filename, attachment_id)
+    let mut pdf_attachments: Vec<(String, Option<String>)> = Vec::new();
     let mut body_text = String::new();
 
     collect_parts(
@@ -171,7 +161,6 @@ async fn fetch_message(
         &mut body_text,
     );
 
-    // Traitement des pièces jointes PDF
     if !pdf_attachments.is_empty() {
         let mut amount: Option<String> = None;
         let mut filenames: Vec<String> = Vec::new();
@@ -180,15 +169,17 @@ async fn fetch_message(
         for (filename, att_id) in &pdf_attachments {
             filenames.push(filename.clone());
             if let Some(id_str) = att_id {
-                let pdf_path = cache::pdf_path(&msg.id, filename);
+                let pdf_path = pdf::storage::path_for(&msg.id, filename);
                 if first_pdf_path.is_none() {
                     first_pdf_path = Some(pdf_path.to_string_lossy().into_owned());
                 }
-                if let Ok(text) =
-                    fetch_and_extract_pdf(client, access_token, &msg.id, id_str, &pdf_path).await
+                if let Ok(bytes) =
+                    pdf::extractor::fetch_and_save(client, access_token, &msg.id, id_str, &pdf_path)
+                        .await
                 {
                     if amount.is_none() {
-                        amount = extract_amount(&text);
+                        let text = pdf::extractor::extract_text(&bytes);
+                        amount = pdf::extractor::extract_amount(&text);
                     }
                 }
             }
@@ -206,7 +197,6 @@ async fn fetch_message(
         }));
     }
 
-    // Pas de PDF joint — cherche des liens de téléchargement dans le corps
     if let Some(link) = extract_invoice_link(&body_text) {
         return Ok(Some(MailInvoice {
             message_id: msg.id.clone(),
@@ -220,10 +210,7 @@ async fn fetch_message(
         }));
     }
 
-    // Mail avec "facture" dans le sujet mais sans PDF ni lien détecté
-    if subject.to_lowercase().contains("facture")
-        || subject.to_lowercase().contains("invoice")
-    {
+    if subject.to_lowercase().contains("facture") || subject.to_lowercase().contains("invoice") {
         return Ok(Some(MailInvoice {
             message_id: msg.id.clone(),
             subject,
@@ -246,7 +233,6 @@ fn collect_parts(
     pdfs: &mut Vec<(String, Option<String>)>,
     text: &mut String,
 ) {
-    // Corps direct (message sans parts)
     if parts.is_empty() {
         if let Some(b) = body {
             if mime_type.contains("text/plain") || mime_type.contains("text/html") {
@@ -276,7 +262,9 @@ fn collect_parts(
             if att_id.is_some() || part.body.as_ref().map(|b| b.size > 0).unwrap_or(false) {
                 pdfs.push((filename, att_id));
             }
-        } else if part.mime_type.starts_with("text/plain") || part.mime_type.starts_with("text/html") {
+        } else if part.mime_type.starts_with("text/plain")
+            || part.mime_type.starts_with("text/html")
+        {
             if let Some(b) = &part.body {
                 if let Some(ref data) = b.data {
                     if let Ok(decoded) = URL_SAFE.decode(data) {
@@ -290,72 +278,8 @@ fn collect_parts(
     }
 }
 
-async fn fetch_and_extract_pdf(
-    client: &Client,
-    access_token: &str,
-    msg_id: &str,
-    att_id: &str,
-    pdf_path: &std::path::Path,
-) -> anyhow::Result<String> {
-    let cfg = &config::get().google;
-
-    // Si le PDF est déjà sur disque, on le relit directement
-    let bytes = if pdf_path.exists() {
-        std::fs::read(pdf_path).context("lecture PDF cache")?
-    } else {
-        let att: AttachmentBody = client
-            .get(format!(
-                "{}/users/me/messages/{}/attachments/{}",
-                cfg.api_base, msg_id, att_id
-            ))
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        let decoded = URL_SAFE.decode(&att.data).context("base64 decode PDF")?;
-
-        // Sauvegarde sur disque
-        if let Some(parent) = pdf_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(pdf_path, &decoded);
-
-        decoded
-    };
-
-    // pdf-extract peut paniquer sur certains color spaces (DeviceN, etc.)
-    let text = std::panic::catch_unwind(|| {
-        pdf_extract::extract_text_from_mem(&bytes).unwrap_or_default()
-    })
-    .unwrap_or_default();
-
-    Ok(text)
-}
-
-// ── Utilitaires d'extraction ──────────────────────────────────────────────────
-
-fn extract_amount(text: &str) -> Option<String> {
-    // Cherche des montants au format : 1 234,56 € / 1234.56 EUR / €1234 etc.
-    let re = Regex::new(
-        r"(?i)(?:total|montant|amount|ttc|net\s+à\s+payer)[^\d]{0,20}([\d\s]+[.,]\d{2})\s*(?:€|eur)",
-    )
-    .ok()?;
-
-    if let Some(cap) = re.captures(text) {
-        return Some(format!("{} €", cap[1].trim().replace(' ', "\u{202F}")));
-    }
-
-    // Fallback : premier montant en euros dans le texte
-    let re2 = Regex::new(r"([\d\s]{1,10}[.,]\d{2})\s*(?:€|EUR)").ok()?;
-    re2.captures(text)
-        .map(|c| format!("{} €", c[1].trim().replace(' ', "\u{202F}")))
-}
-
 fn extract_invoice_link(text: &str) -> Option<String> {
-    // Cherche une URL qui ressemble à un lien de téléchargement de facture
-    let re = Regex::new(
+    let re = regex::Regex::new(
         r"https?://\S+(?:facture|invoice|bill|receipt|download)[^\s<>]*",
     )
     .ok()?;
@@ -363,7 +287,6 @@ fn extract_invoice_link(text: &str) -> Option<String> {
 }
 
 fn extract_name(from: &str) -> String {
-    // "Nom <email@example.com>" -> "Nom"
     if let Some(end) = from.find('<') {
         let name = from[..end].trim().trim_matches('\"').trim();
         if !name.is_empty() {
@@ -374,7 +297,6 @@ fn extract_name(from: &str) -> String {
 }
 
 fn parse_date(raw: &str) -> String {
-    // Garde juste la partie date (dd Mon yyyy)
     let parts: Vec<&str> = raw.trim().splitn(6, ' ').collect();
     if parts.len() >= 4 {
         return format!("{} {} {}", parts[1], parts[2], parts[3]);

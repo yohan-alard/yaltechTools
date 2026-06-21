@@ -1,16 +1,17 @@
 use anyhow::Context;
 use rusqlite::{params, Connection};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
-use crate::app::MailInvoice;
 use crate::config;
+use crate::models::MailInvoice;
+use crate::util::expand_home;
 
 static DB: Mutex<Option<Connection>> = Mutex::new(None);
 
 pub fn init() -> anyhow::Result<()> {
-    let db_path = expand(&config::get().app.cache_db);
-    let pdf_dir = expand(&config::get().app.pdf_dir);
+    let db_path = expand_home(&config::get().app.cache_db);
+    let pdf_dir = expand_home(&config::get().app.pdf_dir);
 
     if let Some(parent) = Path::new(&db_path).parent() {
         std::fs::create_dir_all(parent)?;
@@ -35,18 +36,17 @@ pub fn init() -> anyhow::Result<()> {
             ignored     INTEGER NOT NULL DEFAULT 0
         );",
     )?;
-    // Migration : colonne ignored sur tables existantes
-    let _ = conn.execute_batch("ALTER TABLE mail_invoices ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;");
+    let _ = conn.execute_batch(
+        "ALTER TABLE mail_invoices ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;",
+    );
 
     *DB.lock().unwrap() = Some(conn);
     Ok(())
 }
 
-/// Vérifie si un message est déjà en cache.
 pub fn get(message_id: &str) -> Option<MailInvoice> {
     let guard = DB.lock().unwrap();
     let conn = guard.as_ref()?;
-
     conn.query_row(
         "SELECT subject, from_name, date, amount, kind, link, pdf_path
          FROM mail_invoices WHERE message_id = ?1",
@@ -67,7 +67,6 @@ pub fn get(message_id: &str) -> Option<MailInvoice> {
     .ok()
 }
 
-/// Insère ou met à jour une entrée dans le cache.
 pub fn upsert(message_id: &str, inv: &MailInvoice) {
     let guard = DB.lock().unwrap();
     let Some(conn) = guard.as_ref() else { return };
@@ -84,85 +83,12 @@ pub fn upsert(message_id: &str, inv: &MailInvoice) {
             amount=excluded.amount, kind=excluded.kind, cached_at=excluded.cached_at,
             pdf_path=COALESCE(excluded.pdf_path, mail_invoices.pdf_path)",
         params![
-            message_id,
-            inv.subject,
-            inv.from,
-            inv.date,
-            inv.amount,
-            inv.kind,
-            inv.link,
-            inv.pdf_path,
-            now,
+            message_id, inv.subject, inv.from, inv.date,
+            inv.amount, inv.kind, inv.link, inv.pdf_path, now,
         ],
     );
 }
 
-/// Déplace le PDF d'un message vers le sous-dossier archives/.
-/// Si pdf_path est None, cherche par préfixe de message_id dans le dossier pdfs.
-pub fn archive_pdf(message_id: &str, pdf_path: Option<&str>) {
-    let pdf_dir = expand(&config::get().app.pdf_dir);
-    let archive_dir = format!("{}/archives", pdf_dir);
-    let _ = std::fs::create_dir_all(&archive_dir);
-
-    let move_file = |src: &std::path::Path| {
-        if let Some(name) = src.file_name() {
-            let dst = std::path::Path::new(&archive_dir).join(name);
-            let _ = std::fs::rename(src, &dst);
-        }
-    };
-
-    if let Some(path) = pdf_path {
-        let src = std::path::Path::new(path);
-        if src.exists() {
-            move_file(src);
-            return;
-        }
-    }
-
-    // Fallback : scan par préfixe de message_id
-    let prefix = &message_id[..message_id.len().min(16)];
-    if let Ok(entries) = std::fs::read_dir(&pdf_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with(prefix) {
-                move_file(&entry.path());
-            }
-        }
-    }
-}
-
-/// Chemin où sauvegarder un PDF pour ce message.
-pub fn pdf_path(message_id: &str, filename: &str) -> PathBuf {
-    let dir = expand(&config::get().app.pdf_dir);
-    // Sanitise le nom de fichier
-    let safe_name: String = filename
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
-        .collect();
-    Path::new(&dir).join(format!("{}_{}", &message_id[..message_id.len().min(16)], safe_name))
-}
-
-/// Marque un message comme ignoré (ne sera plus affiché).
-pub fn set_ignored(message_id: &str) {
-    let guard = DB.lock().unwrap();
-    let Some(conn) = guard.as_ref() else { return };
-    let _ = conn.execute(
-        "UPDATE mail_invoices SET ignored=1 WHERE message_id=?1",
-        params![message_id],
-    );
-}
-
-/// Met à jour le montant d'un message (saisie manuelle).
-pub fn set_amount(message_id: &str, amount: &str) {
-    let guard = DB.lock().unwrap();
-    let Some(conn) = guard.as_ref() else { return };
-    let _ = conn.execute(
-        "UPDATE mail_invoices SET amount=?1 WHERE message_id=?2",
-        params![amount, message_id],
-    );
-}
-
-/// Retourne tous les messages déjà en cache (pour le chargement initial rapide).
 pub fn load_all() -> Vec<(String, MailInvoice)> {
     let guard = DB.lock().unwrap();
     let Some(conn) = guard.as_ref() else { return Vec::new() };
@@ -195,32 +121,38 @@ pub fn load_all() -> Vec<(String, MailInvoice)> {
     .unwrap_or_default()
 }
 
-/// Charge les acquittements de rappels pour le mois donné (format "2026-06").
 pub fn load_reminder_acks(month: &str) -> std::collections::HashSet<String> {
     let guard = DB.lock().unwrap();
     let Some(conn) = guard.as_ref() else { return Default::default() };
-    let prefix = format!("{}|", month);
     let mut stmt = match conn.prepare("SELECT key FROM reminder_acks WHERE key LIKE ?1") {
         Ok(s) => s,
         Err(_) => return Default::default(),
     };
-    stmt.query_map(params![format!("{}%", prefix)], |row| row.get::<_, String>(0))
+    stmt.query_map(params![format!("{}|%", month)], |row| row.get::<_, String>(0))
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
 }
 
-/// Persiste un acquittement de rappel.
 pub fn save_reminder_ack(key: &str) {
     let guard = DB.lock().unwrap();
     let Some(conn) = guard.as_ref() else { return };
     let _ = conn.execute("INSERT OR IGNORE INTO reminder_acks(key) VALUES(?1)", params![key]);
 }
 
-pub fn expand(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{}/{}", home, rest)
-    } else {
-        path.to_string()
-    }
+pub fn set_ignored(message_id: &str) {
+    let guard = DB.lock().unwrap();
+    let Some(conn) = guard.as_ref() else { return };
+    let _ = conn.execute(
+        "UPDATE mail_invoices SET ignored=1 WHERE message_id=?1",
+        params![message_id],
+    );
+}
+
+pub fn set_amount(message_id: &str, amount: &str) {
+    let guard = DB.lock().unwrap();
+    let Some(conn) = guard.as_ref() else { return };
+    let _ = conn.execute(
+        "UPDATE mail_invoices SET amount=?1 WHERE message_id=?2",
+        params![amount, message_id],
+    );
 }
